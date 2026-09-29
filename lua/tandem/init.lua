@@ -18,14 +18,43 @@ function M.setup(options)
     error('tandem.nvim requires Neovim 0.11 or newer')
   end
   local config = vim.tbl_deep_extend('force', defaults, options or {})
-  assert(
+  local function expect(condition, message)
+    assert(condition, 'Tandem ' .. message)
+  end
+  expect(
     type(config.sign) == 'string' and vim.fn.strdisplaywidth(config.sign) <= 2,
-    'Tandem sign must fit in two cells'
+    'sign must fit in two cells'
   )
-  assert(
+  expect(
     config.root == nil or type(config.root) == 'string' or type(config.root) == 'function',
-    'Tandem root must be a path or function'
+    'root must be a path or function'
   )
+  for _, name in ipairs({ 'virtual_text', 'git_exclude', 'spell' }) do
+    expect(type(config[name]) == 'boolean', name .. ' must be a boolean')
+  end
+  for _, name in ipairs({ 'width', 'editor_height', 'list_width' }) do
+    local value = config[name]
+    expect(
+      type(value) == 'number' and value > 0 and value < math.huge and value % 1 == 0,
+      name .. ' must be a positive integer'
+    )
+  end
+  local borders = { '', 'none', 'single', 'double', 'rounded', 'solid', 'shadow' }
+  local border = config.border
+  local valid_border = type(border) == 'string' and vim.tbl_contains(borders, border)
+  if type(border) == 'table' and vim.islist(border) and #border > 0 and 8 % #border == 0 then
+    valid_border = true
+    for _, part in ipairs(border) do
+      local text = type(part) == 'table' and part[1] or part
+      if type(text) ~= 'string' or vim.fn.strdisplaywidth(text) > 1 then
+        valid_border = false
+      end
+      if type(part) == 'table' and (not vim.islist(part) or #part ~= 2 or type(part[2]) ~= 'string') then
+        valid_border = false
+      end
+    end
+  end
+  expect(valid_border, 'border must be a supported style or border array')
   require('tandem.annotations').setup(config)
   configured = true
 end

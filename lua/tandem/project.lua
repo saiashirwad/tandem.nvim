@@ -33,9 +33,16 @@ function M.resolve(buf, config)
   if type(root) == 'function' then
     root = root(buf)
   end
-  root = root or vim.fs.root(path or vim.fn.getcwd(), { '.tandem', '.git' }) or vim.fn.getcwd()
+  if not root then
+    local marker = vim.fs.find({ '.tandem', '.git' }, {
+      path = path and vim.fs.dirname(path) or vim.fn.getcwd(),
+      upward = true,
+    })[1]
+    root = marker and vim.fs.dirname(marker) or vim.fn.getcwd()
+  end
   root = M.canonical(root)
-  if not uv.fs_stat(root) or uv.fs_stat(root).type ~= 'directory' then
+  local stat = uv.fs_stat(root)
+  if not stat or stat.type ~= 'directory' then
     error('Project root is not a directory: ' .. root, 0)
   end
   return root, path and M.relative(root, path) or nil

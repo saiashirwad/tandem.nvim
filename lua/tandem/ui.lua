@@ -46,9 +46,9 @@ local function window_options(win)
 end
 
 local function float(buf, title, height, footer)
-  local width = math.max(1, math.min(config.width or 76, vim.o.columns - 4))
+  local width = math.max(1, math.min(config.width, vim.o.columns - 4))
   height = math.max(1, math.min(height, vim.o.lines - vim.o.cmdheight - 4))
-  local border = config.border or 'rounded'
+  local border = config.border
   local bordered = border ~= 'none' and border ~= ''
   local win = api.nvim_open_win(buf, true, {
     relative = 'editor',
@@ -89,12 +89,12 @@ function M.preview(lines)
   local buf = buffer('preview')
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
-  local width = math.max(1, math.min(config.width or 76, vim.o.columns - 4))
+  local width = math.max(1, math.min(config.width, vim.o.columns - 4))
   local height = 0
   for _, line in ipairs(lines) do
     height = height + math.max(1, math.ceil(vim.fn.strdisplaywidth(line) / width))
   end
-  local border = config.border or 'rounded'
+  local border = config.border
   local win = api.nvim_open_win(buf, false, {
     relative = 'cursor',
     row = 1,
@@ -136,7 +136,7 @@ function M.compose(title, body, save, root)
   vim.bo[buf].buftype = 'acwrite'
   api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(body or '', '\n', { plain = true }))
   vim.bo[buf].modified = false
-  local win = float(buf, title, config.editor_height or 10, ':w / Ctrl-S save · q cancel (normal mode)')
+  local win = float(buf, title, config.editor_height, ':w / Ctrl-S save · q cancel (normal mode)')
   vim.wo[win].spell = config.spell == true
 
   local function close()
@@ -159,9 +159,9 @@ function M.compose(title, body, save, root)
       M.notify('Write an annotation before saving.', vim.log.levels.WARN)
       return
     end
-    local ok, err = pcall(save, text)
+    local ok, after_commit = pcall(save, text)
     if not ok then
-      M.notify(err, vim.log.levels.ERROR)
+      M.notify(after_commit, vim.log.levels.ERROR)
       return
     end
     saving = true
@@ -172,6 +172,9 @@ function M.compose(title, body, save, root)
       vim.schedule(close)
     else
       close()
+    end
+    if after_commit then
+      M.guard(after_commit)()
     end
   end
 
@@ -205,11 +208,17 @@ function M.compose(title, body, save, root)
   return buf
 end
 
-local function refresh(view)
+local function refresh(view, state)
   if not api.nvim_buf_is_valid(view.buf) then
     return
   end
-  local ok, lines, rows = pcall(view.render)
+  local ok, lines, rows = pcall(function()
+    local current = state or view.load()
+    if current.error then
+      error(current.error, 0)
+    end
+    return view.render(current)
+  end)
   if not ok then
     lines, rows =
       { '# Unable to read session', '', tostring(lines), '', 'Fix session.json, then press r.' }, {}
@@ -232,39 +241,56 @@ local function refresh(view)
   end
 end
 
-function M.refresh(root)
+function M.refresh(root, state)
   for key, view in pairs(views) do
     if not api.nvim_buf_is_valid(view.buf) then
       views[key] = nil
     elseif view.root == root then
-      refresh(view)
+      refresh(view, state)
     end
   end
 end
 
 function M.view(options)
+  local origin = api.nvim_get_current_win()
+  local source = api.nvim_get_current_buf()
+  for _, view in pairs(views) do
+    if view.buf == source then
+      origin = view.origin
+      break
+    end
+  end
   local previous = views[options.key]
   if previous and api.nvim_buf_is_valid(previous.buf) then
     local win = vim.fn.bufwinid(previous.buf)
     if win ~= -1 then
-      previous.render = options.render
-      refresh(previous)
+      previous.render, previous.load, previous.actions = options.render, options.load, options.actions or {}
+      if origin ~= win then
+        previous.origin = origin
+      end
+      refresh(previous, options.snapshot)
       api.nvim_set_current_win(win)
       return previous.buf
     end
   end
-  local origin = api.nvim_get_current_win()
   local buf = buffer(options.kind)
   vim.b[buf].tandem_root = options.root
-  local view = { buf = buf, root = options.root, render = options.render }
+  local view = {
+    buf = buf,
+    root = options.root,
+    render = options.render,
+    load = options.load,
+    origin = origin,
+    actions = options.actions or {},
+  }
   views[options.key] = view
-  refresh(view)
+  refresh(view, options.snapshot)
   local win
   if options.kind == 'session' then
     win = api.nvim_open_win(buf, true, {
       split = 'right',
       win = -1,
-      width = math.max(1, math.min(config.list_width or 50, math.floor(vim.o.columns / 2))),
+      width = math.max(1, math.min(config.list_width, math.floor(vim.o.columns / 2))),
     })
     window_options(win)
   else
@@ -279,22 +305,32 @@ function M.view(options)
   vim.wo[win].cursorline = true
   local function close()
     api.nvim_buf_delete(buf, { force = true })
-    if api.nvim_win_is_valid(origin) then
-      api.nvim_set_current_win(origin)
+    views[options.key] = nil
+    if api.nvim_win_is_valid(view.origin) then
+      api.nvim_set_current_win(view.origin)
     end
   end
+  api.nvim_create_autocmd('BufWipeout', {
+    buffer = buf,
+    once = true,
+    callback = function()
+      if views[options.key] == view then
+        views[options.key] = nil
+      end
+    end,
+  })
   vim.keymap.set('n', 'q', close, { buffer = buf, desc = 'Close Tandem view' })
   vim.keymap.set('n', '<Esc>', close, { buffer = buf, desc = 'Close Tandem view' })
   vim.keymap.set('n', 'r', function()
     refresh(view)
   end, { buffer = buf, desc = 'Reload Tandem view' })
-  for key, action in pairs(options.actions or {}) do
+  for key in pairs(view.actions) do
     vim.keymap.set(
       'n',
       key,
       M.guard(function()
         local row = api.nvim_win_get_cursor(0)[1]
-        action(view.rows[row], origin)
+        view.actions[key](view.rows[row], view.origin)
       end),
       { buffer = buf, desc = 'Tandem ' .. key }
     )
@@ -302,13 +338,16 @@ function M.view(options)
   return buf
 end
 
-function M.export(text)
+function M.export(root, format, state, load)
   return M.view({
-    key = 'export',
+    key = root .. ':export',
     kind = 'export',
+    root = root,
     title = 'Tandem session export',
-    render = function()
-      return vim.split(text, '\n', { plain = true })
+    snapshot = state,
+    load = load,
+    render = function(current)
+      return vim.split(format(current), '\n', { plain = true })
     end,
   })
 end

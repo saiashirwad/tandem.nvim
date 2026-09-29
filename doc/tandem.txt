@@ -99,9 +99,12 @@ setup() is optional. Defaults: >lua
 root: absolute project path, or function(bufnr) returning a path/nil.
 sign: at most two screen cells; use 'A' for an ASCII marker.
 virtual_text: show annotation counts beside marked lines.
-git_exclude: add .tandem/ to Git's local info/exclude, not .gitignore.
+git_exclude: add .tandem/ to Git's local info/exclude when annotating or saving.
+Reading annotations does not modify Git files. Failed exclusion is retried on
+the next annotation or save.
 spell: enable spell checking in annotation editors.
-width/editor_height/list_width: window dimensions (bounded by screen size).
+width/editor_height/list_width: positive integer dimensions, bounded by screen size.
+Invalid configuration is rejected during setup().
 
 Highlight groups:
     TandemSign   Links to DiagnosticInfo by default.
@@ -132,9 +135,12 @@ Notes are saved in global creation order. Edits change only the body. Export
 prints a snippet once per thread, before its first annotation in session order.
 
 The plugin validates data, writes a temporary file, then atomically renames it.
-Malformed data is left untouched. Failed/stale saves retain the annotation draft.
+Malformed data is left untouched. Failed/stale writes retain the annotation draft.
+Once a write succeeds, the draft is saved even if refreshing a view fails.
 External changes are read on buffer entry, focus and explicit reload; use r in
-open views. There is no background filesystem watcher.
+open views. Source edits redraw from the latest loaded snapshot. A project
+refresh shares one snapshot across its buffers and views. There is no background
+filesystem watcher.
 
 Use one writing editor per root at a time. The VS Code client does not cooperate
 with concurrent writes. Conflict detection is best effort, not a multi-editor

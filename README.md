@@ -28,4 +28,16 @@ System clipboard copying requires a working Neovim clipboard provider. The text 
 
 See **`:help tandem`** or the [full reference](doc/tandem.txt) for commands, key mappings, configuration, and storage details.
 
+## Development
+
+Run the checks with Neovim 0.11 or newer:
+
+```sh
+nvim --headless -u NONE -l tests/run.lua
+stylua --check lua plugin tests
+```
+
+Standalone checks use fresh project fixtures; the annotation journey exercises
+commands, windows, mappings, drafts, and storage together.
+
 [MIT License](LICENSE).

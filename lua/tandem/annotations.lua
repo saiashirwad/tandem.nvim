@@ -4,20 +4,39 @@ local session = require('tandem.session')
 local project = require('tandem.project')
 local copy = require('tandem.copy')
 local ui = require('tandem.ui')
+local render = require('tandem.render')
+local operations = require('tandem.operations')
 local namespace = api.nvim_create_namespace('tandem.annotations')
 local config = {}
 local generations, excluded, reported = {}, {}, {}
 
+local snapshots = {}
+
+local function snapshot(data)
+  local threads, by_id = session.threads(data)
+  return { data = data, threads = threads, by_id = by_id }
+end
+
 local function load(root)
-  local data, source = session.load(root)
-  if config.git_exclude and not excluded[root] then
-    excluded[root] = true
-    local ok, err = pcall(project.exclude, root)
-    if not ok then
-      ui.notify('Could not exclude .tandem/ from Git: ' .. tostring(err), vim.log.levels.WARN)
-    end
+  local ok, data, source = pcall(session.load, root)
+  if not ok then
+    snapshots[root] = { error = tostring(data) }
+    error(data, 0)
   end
+  snapshots[root] = snapshot(data)
   return data, source
+end
+
+local function prepare(root)
+  if not config.git_exclude or excluded[root] then
+    return
+  end
+  local ok, err = pcall(project.exclude, root)
+  if ok then
+    excluded[root] = true
+  else
+    ui.notify('Could not exclude .tandem/ from Git: ' .. tostring(err), vim.log.levels.WARN)
+  end
 end
 
 local function current(require_file)
@@ -35,15 +54,15 @@ local function current(require_file)
 end
 
 local function thread(root, id)
-  local _, by_id = session.threads(load(root))
-  local found = by_id[id]
+  load(root)
+  local found = snapshots[root].by_id[id]
   if not found then
     error('This thread was deleted. Reload the session and select the code again.', 0)
   end
   return found
 end
 
-function M.decorate(buf)
+function M.decorate(buf, fresh)
   if not api.nvim_buf_is_valid(buf) or not api.nvim_buf_is_loaded(buf) then
     return
   end
@@ -52,7 +71,15 @@ function M.decorate(buf)
   if not ok or not file then
     return
   end
-  local loaded, data = pcall(load, root)
+  local loaded, data = pcall(function()
+    if fresh or not snapshots[root] then
+      load(root)
+    end
+    if snapshots[root].error then
+      error(snapshots[root].error, 0)
+    end
+    return snapshots[root]
+  end)
   if not loaded then
     if reported[root] ~= tostring(data) then
       reported[root] = tostring(data)
@@ -62,7 +89,7 @@ function M.decorate(buf)
   end
   reported[root] = nil
   local rows = {}
-  for _, item in ipairs(session.threads(data)) do
+  for _, item in ipairs(data.threads) do
     local anchor = item.anchor
     if anchor.file == file then
       local row = anchor.range and anchor.range.start.line or 0
@@ -84,20 +111,37 @@ function M.decorate(buf)
   end
 end
 
-local function changed(root)
+local function changed(root, data)
+  local state = data and snapshot(data) or snapshots[root]
+  snapshots[root] = state
   for _, buf in ipairs(api.nvim_list_bufs()) do
     if api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == '' then
-      M.decorate(buf)
+      local ok, buf_root = pcall(project.resolve, buf, config)
+      if ok and buf_root == root then
+        M.decorate(buf)
+      end
     end
   end
-  ui.refresh(root)
+  ui.refresh(root, state)
+end
+
+local function refresh_root(root)
+  pcall(load, root)
+  changed(root)
+end
+
+local function publish(root, data)
+  local ok, err = pcall(changed, root, data)
+  if not ok then
+    ui.notify('Session saved, but refresh failed: ' .. tostring(err), vim.log.levels.WARN)
+  end
 end
 
 local function update(root, change)
+  prepare(root)
   local data, source = load(root)
   change(data)
-  session.save(root, data, source)
-  changed(root)
+  return session.save(root, data, source)
 end
 
 local function choose(items, prompt, format, callback)
@@ -118,9 +162,9 @@ local function choose(items, prompt, format, callback)
   end
 end
 
-local function at_cursor(root, file, line, whole_file)
+local function at_cursor(threads, file, line, whole_file)
   local matches = {}
-  for _, item in ipairs(session.threads(load(root))) do
+  for _, item in ipairs(threads) do
     local anchor = item.anchor
     local covers = anchor.range and anchor.range.start.line <= line and line <= anchor.range['end'].line
     if anchor.file == file and (whole_file and not anchor.range or not whole_file and covers) then
@@ -141,27 +185,21 @@ local function compose(root, anchor, existing, source_buf)
     if generation ~= (generations[root] or 0) then
       error('The session was cleared while you wrote. Select the code again.', 0)
     end
-    update(root, function(data)
-      if existing then
-        local _, by_id = session.threads(data)
-        if not by_id[anchor.threadId] or not vim.deep_equal(by_id[anchor.threadId].anchor, anchor) then
-          error('The thread was deleted or its anchor changed. Select the code again.', 0)
-        end
-      end
-      local annotation = vim.deepcopy(anchor)
-      annotation.id = session.id()
-      annotation.body = body
-      annotation.createdAt = os.date('!%Y-%m-%dT%H:%M:%SZ')
-      data.annotations[#data.annotations + 1] = annotation
+    -- Returning post-commit work lets the editor finish saving before refreshing UI.
+    local data = update(root, function(data)
+      operations.append(data, anchor, existing, body, session.id(), os.date('!%Y-%m-%dT%H:%M:%SZ'))
     end)
-    if
-      source_buf
-      and api.nvim_buf_is_valid(source_buf)
-      and api.nvim_buf_get_changedtick(source_buf) ~= tick
-    then
-      ui.notify('Saved. Code changed while you wrote; the original snippet was kept.')
-    else
-      ui.notify('Annotation saved.')
+    return function()
+      publish(root, data)
+      if
+        source_buf
+        and api.nvim_buf_is_valid(source_buf)
+        and api.nvim_buf_get_changedtick(source_buf) ~= tick
+      then
+        ui.notify('Saved. Code changed while you wrote; the original snippet was kept.')
+      else
+        ui.notify('Annotation saved.')
+      end
     end
   end, root)
 end
@@ -177,6 +215,7 @@ function M.annotate(first, last)
   if first < 1 or last > api.nvim_buf_line_count(buf) then
     error('Selection is outside this file.', 0)
   end
+  prepare(root)
   load(root)
   local function create()
     local lines = api.nvim_buf_get_lines(buf, first - 1, last, false)
@@ -191,7 +230,7 @@ function M.annotate(first, last)
     }
     compose(root, anchor, false, buf)
   end
-  local matches = not explicit and at_cursor(root, file, first - 1, false) or {}
+  local matches = not explicit and at_cursor(snapshots[root].threads, file, first - 1, false) or {}
   if #matches == 0 then
     create()
   else
@@ -203,7 +242,9 @@ end
 
 function M.annotate_file()
   local root, file = current(true)
-  local matches = at_cursor(root, file, 0, true)
+  prepare(root)
+  load(root)
+  local matches = at_cursor(snapshots[root].threads, file, 0, true)
   if #matches == 0 then
     compose(root, { threadId = session.id(), file = file, snippet = '' }, false)
   else
@@ -236,19 +277,13 @@ end
 function M.edit(root, id, annotation_id)
   select_annotation(root, id, annotation_id, function(original)
     ui.compose('Edit ' .. session.location(original), original.body, function(body)
-      update(root, function(data)
-        for _, annotation in ipairs(data.annotations) do
-          if annotation.id == original.id then
-            if not vim.deep_equal(annotation, original) then
-              error('This annotation changed on disk. Reopen it before editing.', 0)
-            end
-            annotation.body = body
-            return
-          end
-        end
-        error('This annotation was deleted. Your draft is still open.', 0)
+      local data = update(root, function(data)
+        operations.edit(data, original, body)
       end)
-      ui.notify('Annotation updated.')
+      return function()
+        publish(root, data)
+        ui.notify('Annotation updated.')
+      end
     end, root)
   end)
 end
@@ -262,18 +297,10 @@ function M.delete(root, id, annotation_id)
         if choice ~= 'Delete annotation' then
           return
         end
-        update(root, function(data)
-          for index, annotation in ipairs(data.annotations) do
-            if annotation.id == original.id then
-              if not vim.deep_equal(annotation, original) then
-                error('This annotation changed on disk. Reload before deleting it.', 0)
-              end
-              table.remove(data.annotations, index)
-              return
-            end
-          end
-          error('This annotation was already deleted.', 0)
+        local data = update(root, function(data)
+          operations.delete(data, original)
         end)
+        publish(root, data)
         ui.notify('Annotation deleted.')
       end)
     )
@@ -299,45 +326,21 @@ function M.open_code(root, anchor, origin)
 end
 
 function M.show_thread(root, id)
-  local function render()
-    local _, by_id = session.threads(load(root))
-    local item = by_id[id]
-    if not item then
-      return { '# Thread deleted', '', 'Press q to close.' }
-    end
-    local lines = {
-      '# ' .. session.location(item.anchor),
-      '',
-      'a add · e edit · d delete · o code · r reload · q close',
-      '',
-    }
-    local rows = {}
-    for index, annotation in ipairs(item.annotations) do
-      local start = #lines + 1
-      lines[#lines + 1] = '## ' .. index .. ' · ' .. annotation.createdAt
-      lines[#lines + 1] = ''
-      vim.list_extend(lines, vim.split(annotation.body, '\n', { plain = true }))
-      lines[#lines + 1] = ''
-      for row = start, #lines do
-        rows[row] = annotation.id
-      end
-    end
-    if item.anchor.range then
-      lines[#lines + 1] = '## Original snippet'
-      lines[#lines + 1] = ''
-      vim.list_extend(
-        lines,
-        vim.split(copy.fenced(item.anchor.snippet, copy.language(item.anchor.file)), '\n', { plain = true })
-      )
-    end
-    return lines, rows
+  load(root)
+  local function render_view(snapshot)
+    return render.thread(snapshot.by_id[id])
   end
   return ui.view({
     key = root .. ':' .. id,
     kind = 'thread',
     root = root,
     title = 'Tandem thread',
-    render = render,
+    render = render_view,
+    snapshot = snapshots[root],
+    load = function()
+      load(root)
+      return snapshots[root]
+    end,
     actions = {
       a = function()
         M.add(root, id)
@@ -357,8 +360,10 @@ end
 
 function M.show()
   local root, file = current(true)
-  local matches = at_cursor(root, file, api.nvim_win_get_cursor(0)[1] - 1, false)
-  vim.list_extend(matches, at_cursor(root, file, 0, true))
+  load(root)
+  local threads = snapshots[root].threads
+  local matches = at_cursor(threads, file, api.nvim_win_get_cursor(0)[1] - 1, false)
+  vim.list_extend(matches, at_cursor(threads, file, 0, true))
   choose(matches, 'Open which thread?', describe, function(item)
     M.show_thread(root, item.anchor.threadId)
   end)
@@ -367,32 +372,8 @@ end
 function M.list()
   local root = current(false)
   load(root)
-  local function render()
-    local lines = {
-      '# Tandem session',
-      '',
-      root,
-      '',
-      '<Enter> thread · o code · a add · e edit · d delete',
-      'y copy · r reload · q close',
-      '',
-    }
-    local rows = {}
-    for _, item in ipairs(session.threads(load(root))) do
-      local first = #lines + 1
-      lines[#lines + 1] = '## ' .. session.location(item.anchor)
-      for _, annotation in ipairs(item.annotations) do
-        local summary = annotation.body:gsub('%s+', ' ')
-        lines[#lines + 1] = '  ' .. summary
-        rows[#lines] = { thread = item.anchor.threadId, annotation = annotation.id }
-      end
-      rows[first] = { thread = item.anchor.threadId }
-      lines[#lines + 1] = ''
-    end
-    if #lines == 7 then
-      lines[#lines + 1] = 'No annotations yet. Select code and run :Tandem annotate.'
-    end
-    return lines, rows
+  local function render_view(snapshot)
+    return render.list(root, snapshot.threads)
   end
   local function action(callback)
     return function(row, origin)
@@ -406,7 +387,12 @@ function M.list()
     kind = 'session',
     root = root,
     title = 'Tandem session',
-    render = render,
+    render = render_view,
+    snapshot = snapshots[root],
+    load = function()
+      load(root)
+      return snapshots[root]
+    end,
     actions = {
       ['<CR>'] = action(function(row)
         M.show_thread(root, row.thread)
@@ -455,7 +441,18 @@ end
 
 function M.export()
   local root = current(false)
-  return ui.export(copy.format(load(root)))
+  load(root)
+  return ui.export(
+    root,
+    function(state)
+      return copy.format(state.data)
+    end,
+    snapshots[root],
+    function()
+      load(root)
+      return snapshots[root]
+    end
+  )
 end
 
 function M.clear()
@@ -472,9 +469,10 @@ function M.clear()
       if choice ~= 'Clear session' then
         return
       end
-      session.save(root, { annotations = {} }, source)
+      prepare(root)
+      local data = session.save(root, { annotations = {} }, source)
       generations[root] = (generations[root] or 0) + 1
-      changed(root)
+      publish(root, data)
       ui.notify('Session cleared.')
     end)
   )
@@ -484,7 +482,8 @@ function M.jump(direction)
   ui.close_preview()
   local root, file = current(true)
   local positions, seen = {}, {}
-  local threads = session.threads(load(root))
+  load(root)
+  local threads = snapshots[root].threads
   for _, item in ipairs(threads) do
     if item.anchor.file == file then
       local line = item.anchor.range and item.anchor.range.start.line + 1 or 1
@@ -510,21 +509,7 @@ function M.jump(direction)
   end
   api.nvim_win_set_cursor(0, { target, 0 })
   vim.cmd('normal! zvzz')
-  local lines = {}
-  for _, item in ipairs(threads) do
-    local line = item.anchor.range and item.anchor.range.start.line + 1 or 1
-    if item.anchor.file == file and line == target then
-      if #lines > 0 then
-        lines[#lines + 1] = ''
-      end
-      lines[#lines + 1] = '# ' .. session.location(item.anchor)
-      for _, annotation in ipairs(item.annotations) do
-        lines[#lines + 1] = ''
-        vim.list_extend(lines, vim.split(annotation.body, '\n', { plain = true }))
-      end
-    end
-  end
-  ui.preview(lines)
+  ui.preview(render.preview(threads, file, target))
 end
 
 function M.reload()
@@ -548,19 +533,36 @@ function M.setup(options)
     group = group,
     callback = function(event)
       if vim.bo[event.buf].buftype == '' then
-        vim.schedule(function()
-          M.decorate(event.buf)
-        end)
+        vim.schedule(ui.guard(function()
+          if not api.nvim_buf_is_valid(event.buf) then
+            return
+          end
+          if event.event == 'TextChanged' or event.event == 'TextChangedI' then
+            M.decorate(event.buf)
+          else
+            local ok, root = pcall(project.resolve, event.buf, config)
+            if ok then
+              refresh_root(root)
+            end
+          end
+        end))
       end
     end,
   })
   api.nvim_create_autocmd('FocusGained', {
     group = group,
-    callback = function()
+    callback = ui.guard(function()
+      local roots = {}
       for _, buf in ipairs(api.nvim_list_bufs()) do
-        M.decorate(buf)
+        if api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == '' then
+          local ok, root = pcall(project.resolve, buf, config)
+          if ok and not roots[root] then
+            roots[root] = true
+            refresh_root(root)
+          end
+        end
       end
-    end,
+    end),
   })
   vim.schedule(function()
     M.decorate(api.nvim_get_current_buf())

@@ -56,7 +56,12 @@ local function fails(callback, pattern)
 end
 
 local function test(name, callback)
-  callback()
+  local has, rename = vim.fn.has, vim.uv.fs_rename
+  local ok, err = xpcall(callback, debug.traceback)
+  vim.fn.has, vim.uv.fs_rename = has, rename
+  if not ok then
+    error(err, 0)
+  end
   count = count + 1
   print('ok ' .. count .. ' - ' .. name)
 end
@@ -80,13 +85,10 @@ local function draft(text)
 end
 
 local function run()
+  dofile('tests/checks.lua')({ test = test, eq = eq, fails = fails, write = write })
   tandem.setup({ root = root, git_exclude = false })
-  test('shared protocol fixture preserves the VS Code export byte-for-byte', function()
-    local data =
-      session.validate(vim.json.decode(table.concat(vim.fn.readfile('tests/fixtures/session.json'), '\n')))
-    eq(copy.format(data), table.concat(vim.fn.readfile('tests/fixtures/session.md'), '\n'))
-    eq(session.validate(vim.json.decode(vim.json.encode(data))), data)
-  end)
+
+  -- One complete annotation journey shares its session across the following steps.
   write(root .. '/sample.lua', 'first\nlocal smile = "🙂"\nlast\n')
   vim.cmd.edit(vim.fn.fnameescape(root .. '/sample.lua'))
   local code_buf, code_win = api.nvim_get_current_buf(), api.nvim_get_current_win()
@@ -234,26 +236,6 @@ local function run()
     assert(copy.format(data):find('```lua\nlocal smile = "🙂"\n```', 1, true))
   end)
 
-  test('safe Markdown fences and global annotation order match Tandem', function()
-    local data = session.load(root)
-    local first = vim.deepcopy(data.annotations[1])
-    first.snippet = '```\n````\n'
-    first.body = 'first'
-    local second = vim.deepcopy(first)
-    second.id, second.body = 'other', 'second'
-    local file = vim.deepcopy(data.annotations[2])
-    file.body = 'between'
-    local text = copy.format({ annotations = { first, file, second } })
-    eq(
-      text,
-      '## sample.lua:2\n\n`````lua\n```\n````\n`````\n\nfirst\n\n## sample.lua\n\nbetween\n\n## sample.lua:2\n\nsecond'
-    )
-    eq(copy.language('.bashrc'), '')
-    eq(copy.language('src/.config.lua'), 'lua')
-    eq(copy.language('src/file.'), '')
-    eq(copy.language('src/example.d.ts'), 'ts')
-  end)
-
   test('copy falls back to register 0 and export is available without a clipboard', function()
     code()
     local expected = copy.format(session.load(root))
@@ -276,18 +258,6 @@ local function run()
     eq(vim.fn.getreg('0'), expected)
     assert(messages[#messages]:find('requested system clipboard copy', 1, true))
     assert(not messages[#messages]:find('to the clipboard', 1, true))
-  end)
-
-  test('atomic save rejects external modification without changing the newer file', function()
-    local data, source = session.load(root)
-    local newer = vim.deepcopy(data)
-    newer.annotations[1].body = 'External edit'
-    session.save(root, newer, source)
-    fails(function()
-      session.save(root, data, source)
-    end, 'Session changed on disk')
-    eq(session.load(root).annotations[1].body, 'External edit')
-    eq(vim.fn.glob(session.path(root) .. '.tmp-*'), '')
   end)
 
   test('stale annotation edit preserves the external edit and keeps the draft', function()
@@ -315,52 +285,6 @@ local function run()
     eq(table.concat(vim.fn.readfile(session.path(root)), '\n'), '{broken')
     write(session.path(root), source)
     tandem.reload()
-  end)
-
-  test('validator rejects duplicate IDs, inconsistent anchors, invalid dates, nulls and traversal', function()
-    local data = session.load(root)
-    local one = vim.deepcopy(data.annotations[1])
-    local two = vim.deepcopy(one)
-    fails(function()
-      session.validate({ annotations = { one, two } })
-    end, 'duplicate')
-    two.id, two.snippet = 'different', 'different'
-    fails(function()
-      session.validate({ annotations = { one, two } })
-    end, 'inconsistent')
-    for _, file in ipairs({ '../escape', '/absolute', 'C:\\absolute', 'a/../b', 'a\\..\\b' }) do
-      local bad = vim.deepcopy(one)
-      bad.file = file
-      fails(function()
-        session.validate({ annotations = { bad } })
-      end, 'file path')
-    end
-    local bad = vim.deepcopy(one)
-    bad.createdAt = '2026-02-30T12:00:00Z'
-    fails(function()
-      session.validate({ annotations = { bad } })
-    end, 'timestamp')
-    bad = vim.deepcopy(one)
-    bad.range = vim.NIL
-    fails(function()
-      session.validate({ annotations = { bad } })
-    end, 'range')
-    fails(function()
-      session.validate(vim.json.decode('{"annotations":{}}'))
-    end, 'array')
-  end)
-
-  test('canonical project paths reject outside files and symlink escapes', function()
-    fails(function()
-      project.relative(root, root .. '-other/file')
-    end, 'Only files inside')
-    local outside = vim.fn.tempname()
-    write(outside, 'outside')
-    assert(vim.uv.fs_symlink(outside, root .. '/escape'))
-    fails(function()
-      project.file(root, 'escape')
-    end, 'Only files inside')
-    vim.fn.delete(outside)
   end)
 
   test('missing files retain readable thread snapshots', function()
@@ -503,48 +427,6 @@ local function run()
     eq(api.nvim_get_current_buf(), draft_buf)
     eq(session.load(root).annotations, {})
     api.nvim_buf_delete(draft_buf, { force = true })
-  end)
-
-  test('Git exclusion uses the worktree-aware path and is idempotent', function()
-    if vim.fn.executable('git') ~= 1 then
-      return
-    end
-    local repo = root .. '/git-project'
-    vim.fn.mkdir(repo, 'p')
-    assert(vim.system({ 'git', 'init', '-q', repo }):wait().code == 0)
-    write(repo .. '/.git/info/exclude', '# keep this without newline')
-    project.exclude(repo)
-    project.exclude(repo)
-    eq(vim.fn.readfile(repo .. '/.git/info/exclude'), { '# keep this without newline', '.tandem/' })
-    eq(vim.fn.filereadable(repo .. '/.gitignore'), 0)
-    write(repo .. '/file.lua', 'return true\n')
-    assert(vim.system({ 'git', '-C', repo, 'add', 'file.lua' }):wait().code == 0)
-    assert(vim
-      .system({
-        'git',
-        '-C',
-        repo,
-        '-c',
-        'user.name=Tandem Test',
-        '-c',
-        'user.email=test@example.invalid',
-        '-c',
-        'commit.gpgsign=false',
-        'commit',
-        '-qm',
-        'fixture',
-      })
-      :wait().code == 0)
-    local worktree = root .. '/worktree'
-    assert(
-      vim.system({ 'git', '-C', repo, 'worktree', 'add', '--detach', worktree, 'HEAD' }):wait().code == 0
-    )
-    project.exclude(worktree)
-    eq(vim.fn.readfile(repo .. '/.git/info/exclude'), { '# keep this without newline', '.tandem/' })
-    local buf = vim.fn.bufadd(worktree .. '/file.lua')
-    local resolved, file = project.resolve(buf, {})
-    eq(resolved, worktree)
-    eq(file, 'file.lua')
   end)
 end
 
