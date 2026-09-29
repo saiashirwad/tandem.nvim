@@ -1,0 +1,5 @@
+.tandem/
+*.swp
+*.swo
+.DS_Store
+doc/tags

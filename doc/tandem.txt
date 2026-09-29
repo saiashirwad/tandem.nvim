@@ -1,0 +1,149 @@
+*tandem.txt*    Native code annotations for Neovim
+
+===============================================================================
+CONTENTS                                                     *tandem*
+
+    Getting started ........ |tandem-start|
+    Commands ............... |tandem-commands|
+    Views .................. |tandem-views|
+    Configuration .......... |tandem-config|
+    Storage ................ |tandem-storage|
+
+===============================================================================
+GETTING STARTED                                               *tandem-start*
+
+Tandem collects your annotations on code and exports them for a coding agent.
+Requires Neovim 0.11+. There are no runtime dependencies or required UI plugins.
+This client implements annotations; walks and proposal reviews are future work.
+
+Select code, then use :'<,'>Tandem annotate. Write in the Markdown float and
+save with CTRL-S or :w. In Insert mode, Escape returns to Normal mode. In Normal
+mode, q cancels (confirming if the draft has changed).
+
+Without a selection, :Tandem annotate adds to a thread covering the cursor or
+creates an annotation on that line. An explicit range starts a new thread.
+Overlapping threads are chosen with vim.ui.select().
+
+No leader mappings are installed. Example: >lua
+    vim.keymap.set({ 'n', 'x' }, '<leader>ta', '<Plug>(TandemAnnotate)')
+    vim.keymap.set('n', '<leader>tf', '<Plug>(TandemAnnotateFile)')
+    vim.keymap.set('n', '<leader>tt', '<Plug>(TandemShow)')
+    vim.keymap.set('n', '<leader>tl', '<Plug>(TandemList)')
+    vim.keymap.set('n', '<leader>ty', '<Plug>(TandemCopy)')
+    vim.keymap.set('n', ']a', '<Plug>(TandemNext)')
+    vim.keymap.set('n', '[a', '<Plug>(TandemPrev)')
+<
+===============================================================================
+COMMANDS                                                      *tandem-commands*
+
+:Tandem [list]            Open the annotation session in a split.
+:[range]Tandem annotate   Annotate whole lines or add at the cursor.
+:Tandem file             Annotate the whole current file.
+:Tandem show             Read a thread covering the cursor or the whole file.
+:Tandem next             Jump to the next annotation in this file, wrapping.
+:Tandem prev             Jump to the previous annotation, wrapping.
+:Tandem copy             Export to register 0 and, if available, the clipboard.
+:Tandem export           Open the exported text in a read-only buffer.
+:Tandem clear            Delete every annotation after confirmation.
+:Tandem reload           Reload the current project's session from disk.
+:checkhealth tandem      Check Neovim, Git and clipboard availability.
+
+The exported text is always available via "0p or CTRL-R 0. If a clipboard
+provider is configured, it also goes to register +. Over SSH/tmux, copying to
+your desktop depends on your existing provider/OSC 52 configuration.
+
+Lua equivalents live in require('tandem'): annotate(first?, last?),
+annotate_visual(), annotate_file(), show(), list(), next(), prev(), copy(),
+export(), clear(), reload(). Explicit line numbers are one-based and inclusive.
+
+===============================================================================
+VIEWS                                                         *tandem-views*
+
+Session split:
+    <Enter>   Open the selected thread.
+    o         Open its source file.
+    a         Append an annotation to its thread.
+    e         Edit the selected annotation (or choose one on a heading).
+    d         Delete the selected annotation after confirmation.
+    y         Copy the entire session.
+    r         Reload.
+    q/<Esc>   Close.
+
+Thread viewer:
+    a/e/d/o/r/q work as above. Place the cursor on an annotation to select it
+    directly. From a header, e/d offer a chooser. The original snippet follows
+    the annotations. Missing source files remain readable here.
+
+Annotation editor:
+    Normal Vim editing, including multiline text and undo.
+    CTRL-S or :w saves. Failed saves keep the draft open.
+    In Normal mode, q or <Esc> cancels, asking before discarding changes.
+    Ordinary Insert-mode <Esc> only returns to Normal mode.
+
+===============================================================================
+CONFIGURATION                                                 *tandem-config*
+
+setup() is optional. Defaults: >lua
+    require('tandem').setup({
+      root = nil,
+      sign = '●',
+      virtual_text = false,
+      git_exclude = true,
+      border = 'rounded',
+      width = 76,
+      editor_height = 10,
+      list_width = 50,
+      spell = false,
+    })
+<
+root: absolute project path, or function(bufnr) returning a path/nil.
+sign: at most two screen cells; use 'A' for an ASCII marker.
+virtual_text: show annotation counts beside marked lines.
+git_exclude: add .tandem/ to Git's local info/exclude, not .gitignore.
+spell: enable spell checking in annotation editors.
+width/editor_height/list_width: window dimensions (bounded by screen size).
+
+Highlight groups:
+    TandemSign   Links to DiagnosticInfo by default.
+    TandemHint   Links to Comment by default.
+
+Markers use the sign column. 'signcolumn' set to "no" hides them.
+
+===============================================================================
+STORAGE                                                       *tandem-storage*
+
+The session lives in .tandem/session.json at the project root. The format is
+shared with Tandem for VS Code. Root selection uses an explicit root first,
+then the nearest ancestor with .tandem or .git, then the working directory.
+Use an explicit root for unusual layouts. Different roots have separate sessions.
+
+Only named file buffers within the root can be annotated. Canonical paths prevent
+symlinks from escaping it; in-root aliases use the target's relative path.
+
+All selections expand to whole lines. The visual mapping respects 'selection';
+block selections include all touched lines. An Ex range includes every specified
+line. Snippets include unsaved edits and preserve the buffer's line endings.
+
+Original locations and snippets are immutable. Markers are redrawn at the saved
+line numbers after source edits. Out-of-range locations have no marker. Missing
+or renamed files keep their annotations and snippets in the session list.
+
+Notes are saved in global creation order. Edits change only the body. Export
+prints a snippet once per thread, before its first annotation in session order.
+
+The plugin validates data, writes a temporary file, then atomically renames it.
+Malformed data is left untouched. Failed/stale saves retain the annotation draft.
+External changes are read on buffer entry, focus and explicit reload; use r in
+open views. There is no background filesystem watcher.
+
+Use one writing editor per root at a time. The VS Code client does not cooperate
+with concurrent writes. Conflict detection is best effort, not a multi-editor
+transaction. Reload VS Code after editing the session in Neovim.
+
+Timestamps must be ISO 8601 (UTC or numeric offset). This includes every timestamp
+written by the VS Code client; legacy hand-written dates may need normalization.
+
+Clear session affects annotations only. walk.json and review.json are untouched.
+Agents should read annotations, not overwrite the editor-owned session file.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

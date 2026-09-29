@@ -1,0 +1,39 @@
+{
+  "annotations": [
+    {
+      "id": "annotation-1",
+      "threadId": "thread-1",
+      "file": "src/emoji.ts",
+      "range": { "start": { "line": 4, "character": 0 }, "end": { "line": 5, "character": 17 } },
+      "snippet": "const icon = '🙂'\nconsole.log(icon)",
+      "body": "Why this icon?\nKeep its Unicode intact.",
+      "createdAt": "2026-09-29T10:00:00.000Z"
+    },
+    {
+      "id": "annotation-2",
+      "threadId": "thread-2",
+      "file": ".env",
+      "snippet": "",
+      "body": "Document the environment variables.",
+      "createdAt": "2026-09-29T10:01:00.000Z"
+    },
+    {
+      "id": "annotation-3",
+      "threadId": "thread-1",
+      "file": "src/emoji.ts",
+      "range": { "start": { "line": 4, "character": 0 }, "end": { "line": 5, "character": 17 } },
+      "snippet": "const icon = '🙂'\nconsole.log(icon)",
+      "body": "Answer: it is intentional.",
+      "createdAt": "2026-09-29T10:02:00.000Z"
+    },
+    {
+      "id": "annotation-4",
+      "threadId": "thread-3",
+      "file": "README.md",
+      "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 3 } },
+      "snippet": "```ts\nconst answer = 42\n```",
+      "body": "An annotation on a fenced example.",
+      "createdAt": "2026-09-29T10:03:00.000Z"
+    }
+  ]
+}
